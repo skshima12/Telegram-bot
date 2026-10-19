@@ -9,7 +9,17 @@ from docker.errors import DockerException, NotFound, APIError
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("sk-runner")
 SECRET = os.getenv("RUNNER_API_SECRET", "").strip()
-DATA_DIR = Path(os.getenv("DATA_DIR", "./data")).resolve()
+# Vercel's deployed code directory (/var/task) is read-only.
+# This fallback prevents import-time crashes for API smoke tests only.
+# /tmp is ephemeral and Vercel does not provide a Docker Engine, so it is
+# NOT suitable for hosting user bots. For real hosting set DATA_DIR to a
+# persistent path on a Docker-capable server.
+if os.getenv("DATA_DIR"):
+    DATA_DIR = Path(os.environ["DATA_DIR"]).expanduser().resolve()
+elif os.getenv("VERCEL"):
+    DATA_DIR = Path("/tmp/sk-bot-hosting-data")
+else:
+    DATA_DIR = Path("./data").resolve()
 PROJECTS_DIR = DATA_DIR / "projects"
 DB_PATH = DATA_DIR / "runner.sqlite3"
 MAX_UPLOAD = 8 * 1024 * 1024
@@ -159,7 +169,23 @@ def create_container(project):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "service": "sk-hosting-runner"}
+    # Health only means the API process loaded. It does not imply that Docker
+    # is available or that this instance can host bots.
+    docker_available = False
+    try:
+        client = docker.from_env()
+        client.ping()
+        docker_available = True
+        client.close()
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "service": "sk-hosting-runner",
+        "docker_available": docker_available,
+        "storage_persistent": not bool(os.getenv("VERCEL")),
+        "note": "Vercel is suitable for API smoke tests only; bot execution requires a Docker-capable host with persistent storage." if os.getenv("VERCEL") else "Verify Docker and persistent storage before accepting user projects."
+    }
 
 @app.post("/projects")
 async def create_project(authorization: Optional[str] = Header(None), owner_id: int = Form(...),
